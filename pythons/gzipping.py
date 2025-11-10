@@ -30,7 +30,7 @@ def compress_nii_files(folder):
     print(f"{'='*60}")
 
 if __name__ == "__main__":
-    folder_path = "C://Users//anoma//Downloads//surgipath-datasets//collective"
+    folder_path = "C:\\Users\\anoma\\Downloads\\spine-segmentation-data-cleaning\\VerSe_clean_v3\\labels"
     
     if not os.path.exists(folder_path):
         print(f"ERROR: Folder not found: {folder_path}")

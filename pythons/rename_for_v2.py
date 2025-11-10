@@ -1,231 +1,193 @@
+import nibabel as nib
+import numpy as np
 from pathlib import Path
-import re
+import shutil
+
+def remove_labels_above_threshold(nii_in_path, nii_out_path, threshold=7):
+    """
+    Remove all labels above threshold from segmentation file.
+    Preserves original data type for segmentation integrity.
+    """
+    img = nib.load(nii_in_path)
+    data = np.asarray(img.dataobj)  # Preserves original dtype
+    
+    # Zero out labels above threshold
+    data[data > threshold] = 0
+    
+    # Save modified data as new NIfTI
+    new_img = nib.Nifti1Image(data, affine=img.affine, header=img.header)
+    nib.save(new_img, nii_out_path)
+    print(f"  ✓ Cleaned segmentation: {nii_out_path.name}")
 
 
-def extract_case_number(filename: str) -> int:
+def process_rsna_dataset(base_path, threshold=7):
     """
-    Extract a numeric identifier from various filename patterns.
-    Tries to find any number in the filename to use as case number.
+    Process RSNA dataset:
+    1. Find volume/segmentation pairs in volumes/ and labels/ folders
+    2. Rename to nnUNet format (RSNA_xxx_0000.nii.gz and RSNA_xxx.nii.gz)
+    3. Filter segmentations to keep only labels ≤ threshold
+    4. Save to renamed_vol/ and labels_cervical_only/ folders
     """
-    # Remove extension and _0000 suffix
-    name = filename.replace('_0000', '').replace('.nii.gz', '').replace('.nii', '')
+    base_path = Path(base_path)
+    volumes_path = base_path / "volumes"
+    labels_path = base_path / "labels"
     
-    # Try to find any numbers in the filename
-    numbers = re.findall(r'\d+', name)
+    # Create output directories
+    renamed_vol_path = base_path / "renamed_vol"
+    cervical_labels_path = base_path / "labels_cervical_only"
     
-    if numbers:
-        # Use the first substantial number found (prefer longer numbers)
-        numbers_by_length = sorted(numbers, key=len, reverse=True)
-        return int(numbers_by_length[0])
+    renamed_vol_path.mkdir(exist_ok=True)
+    cervical_labels_path.mkdir(exist_ok=True)
     
-    # Fallback: use hash of filename if no numbers found
-    return abs(hash(name)) % 10000
-
-
-def get_file_pairs(images_dir: Path, labels_dir: Path) -> list[dict]:
-    """
-    Match image files with their corresponding label files.
-    Returns list of {'image': Path, 'label': Path, 'base_name': str}
-    """
-    # Get all label files (they don't have _0000)
-    label_files = sorted(labels_dir.glob("*.nii.gz")) + sorted(labels_dir.glob("*.nii"))
+    print(f"Processing RSNA dataset at: {base_path}")
+    print(f"Source folders:")
+    print(f"  - Volumes: {volumes_path}")
+    print(f"  - Labels:  {labels_path}")
+    print(f"Output folders:")
+    print(f"  - Volumes: {renamed_vol_path}")
+    print(f"  - Labels:  {cervical_labels_path}")
+    print()
     
-    pairs = []
-    unmatched_images = []
+    # Find all volume files (assuming .nii.gz format)
+    vol_files = sorted(volumes_path.glob("*.nii.gz"))
     
+    if not vol_files:
+        print("ERROR: No volume files found matching pattern '*.nii.gz'")
+        print(f"Please check if files exist in: {volumes_path}")
+        return
+    
+    print(f"Found {len(vol_files)} volume files")
+    print()
+    
+    # Find all label files
+    label_files = sorted(labels_path.glob("*.nii.gz"))
+    
+    if not label_files:
+        print("ERROR: No label files found matching pattern '*.nii.gz'")
+        print(f"Please check if files exist in: {labels_path}")
+        return
+    
+    print(f"Found {len(label_files)} label files")
+    print()
+    
+    # Create a mapping between volumes and labels
+    # Assuming they have similar base names (e.g., case1.nii.gz and case1_seg.nii.gz)
+    # or identical names in different folders
+    
+    vol_basenames = {}
+    for vol_file in vol_files:
+        # Remove common suffixes to find base name
+        basename = vol_file.stem.replace('.nii', '')
+        # Store both with and without potential suffixes
+        vol_basenames[basename] = vol_file
+        # Also try without common volume suffixes
+        clean_name = basename.replace('_volume', '').replace('_vol', '').replace('_image', '')
+        vol_basenames[clean_name] = vol_file
+    
+    label_basenames = {}
     for label_file in label_files:
-        # Find corresponding image file
-        # Try with _0000 suffix first
-        image_name_with_suffix = label_file.stem.replace('.nii', '') + '_0000' + label_file.suffix
-        image_file = images_dir / image_name_with_suffix
+        basename = label_file.stem.replace('.nii', '')
+        label_basenames[basename] = label_file
+        # Also try without common label suffixes
+        clean_name = basename.replace('_seg', '').replace('_label', '').replace('_mask', '').replace('_segmentation', '')
+        label_basenames[clean_name] = label_file
+    
+    # Find matching pairs
+    print("Matching volume-label pairs...")
+    pairs = []
+    
+    for vol_file in vol_files:
+        vol_basename = vol_file.stem.replace('.nii', '')
+        vol_clean = vol_basename.replace('_volume', '').replace('_vol', '').replace('_image', '')
         
-        if not image_file.exists():
-            # Try without .gz if it has it
-            if label_file.suffix == '.gz':
-                image_name_with_suffix = label_file.stem.replace('.nii', '') + '_0000.nii.gz'
-                image_file = images_dir / image_name_with_suffix
+        # Try to find matching label
+        label_file = None
         
-        if image_file.exists():
-            pairs.append({
-                'image': image_file,
-                'label': label_file,
-                'base_name': label_file.stem.replace('.nii', '')
-            })
+        # Strategy 1: Exact match
+        if vol_basename in label_basenames:
+            label_file = label_basenames[vol_basename]
+        # Strategy 2: Volume name + _seg
+        elif f"{vol_basename}_seg" in label_basenames:
+            label_file = label_basenames[f"{vol_basename}_seg"]
+        # Strategy 3: Volume name + _label
+        elif f"{vol_basename}_label" in label_basenames:
+            label_file = label_basenames[f"{vol_basename}_label"]
+        # Strategy 4: Clean name match
+        elif vol_clean in label_basenames:
+            label_file = label_basenames[vol_clean]
+        # Strategy 5: Check if any label starts with volume basename
         else:
-            print(f"  WARNING: No matching image found for label: {label_file.name}")
-    
-    # Check for orphaned images
-    all_image_files = set(images_dir.glob("*_0000.nii.gz")) | set(images_dir.glob("*_0000.nii"))
-    matched_images = {pair['image'] for pair in pairs}
-    orphaned = all_image_files - matched_images
-    
-    if orphaned:
-        print(f"\n  WARNING: Found {len(orphaned)} orphaned image files (no matching label):")
-        for img in sorted(orphaned)[:5]:  # Show first 5
-            print(f"    - {img.name}")
-        if len(orphaned) > 5:
-            print(f"    ... and {len(orphaned) - 5} more")
-    
-    return pairs
-
-
-def generate_new_names(pairs: list[dict]) -> list[dict]:
-    """
-    Generate CVPP_XXX format names for all pairs.
-    Returns list of {'old_image': Path, 'old_label': Path, 'new_base': str}
-    """
-    # Sort pairs by extracted case number to maintain some ordering
-    sorted_pairs = sorted(pairs, key=lambda p: extract_case_number(p['base_name']))
-    
-    rename_map = []
-    for idx, pair in enumerate(sorted_pairs, start=1):
-        new_base = f"CVPP_{idx:03d}"  # CVPP_001, CVPP_002, etc.
-        rename_map.append({
-            'old_image': pair['image'],
-            'old_label': pair['label'],
-            'new_base': new_base,
-            'old_base': pair['base_name']
-        })
-    
-    return rename_map
-
-
-def preview_renames(rename_map: list[dict]) -> None:
-    """Show preview of what will be renamed."""
-    print(f"\n{'='*80}")
-    print("PREVIEW OF RENAMES")
-    print(f"{'='*80}\n")
-    
-    print(f"Total pairs to rename: {len(rename_map)}\n")
-    
-    # Show first 10 and last 5
-    preview_count = min(10, len(rename_map))
-    
-    print("First few renames:")
-    for item in rename_map[:preview_count]:
-        print(f"\n  {item['old_base']}")
-        print(f"    Image: {item['old_image'].name}")
-        print(f"      →  {item['new_base']}_0000{item['old_image'].suffix}")
-        print(f"    Label: {item['old_label'].name}")
-        print(f"      →  {item['new_base']}{item['old_label'].suffix}")
-    
-    if len(rename_map) > preview_count:
-        print(f"\n  ... {len(rename_map) - preview_count} more pairs ...")
+            for label_basename, lf in label_basenames.items():
+                if label_basename.startswith(vol_clean) or vol_clean.startswith(label_basename.replace('_seg', '').replace('_label', '')):
+                    label_file = lf
+                    break
         
-        if len(rename_map) > preview_count + 5:
-            print("\nLast few renames:")
-            for item in rename_map[-5:]:
-                print(f"\n  {item['old_base']}")
-                print(f"    Image: {item['old_image'].name} → {item['new_base']}_0000{item['old_image'].suffix}")
-                print(f"    Label: {item['old_label'].name} → {item['new_base']}{item['old_label'].suffix}")
-
-
-def rename_files(rename_map: list[dict], dry_run: bool = True) -> None:
-    """
-    Perform the actual renaming.
+        if label_file:
+            pairs.append((vol_file, label_file))
+        else:
+            print(f"  ⚠ No matching label found for volume: {vol_file.name}")
     
-    Args:
-        rename_map: List of rename operations
-        dry_run: If True, only simulate (don't actually rename)
-    """
-    if dry_run:
-        print(f"\n{'='*80}")
-        print("DRY RUN - No files will be renamed")
-        print(f"{'='*80}\n")
+    print(f"Found {len(pairs)} matching volume-label pairs")
+    print()
+    
+    if len(pairs) == 0:
+        print("ERROR: No matching pairs found! Check your file naming convention.")
+        print("\nExample volume files:")
+        for vf in vol_files[:3]:
+            print(f"  {vf.name}")
+        print("\nExample label files:")
+        for lf in label_files[:3]:
+            print(f"  {lf.name}")
         return
     
-    print(f"\n{'='*80}")
-    print("RENAMING FILES...")
-    print(f"{'='*80}\n")
+    # Process each pair
+    processed_count = 0
+    skipped_count = 0
     
-    success_count = 0
-    error_count = 0
-    
-    for item in rename_map:
+    for idx, (vol_file, label_file) in enumerate(pairs, start=1):
+        # Generate RSNA format names
+        nnunet_id = f"{idx:03d}"
+        nnunet_vol_name = f"RSNA_{nnunet_id}_0000.nii.gz"
+        nnunet_seg_name = f"RSNA_{nnunet_id}.nii.gz"
+        
+        out_vol_path = renamed_vol_path / nnunet_vol_name
+        out_seg_path = cervical_labels_path / nnunet_seg_name
+        
+        print(f"Processing pair {idx:03d}:")
+        print(f"  Volume: {vol_file.name} → {nnunet_vol_name}")
+        print(f"  Label:  {label_file.name} → {nnunet_seg_name}")
+        
         try:
-            # Rename image file
-            new_image_name = f"{item['new_base']}_0000{item['old_image'].suffix}"
-            new_image_path = item['old_image'].parent / new_image_name
-            item['old_image'].rename(new_image_path)
+            # Copy and rename volume (no modification needed)
+            shutil.copy2(vol_file, out_vol_path)
+            print(f"  ✓ Copied volume: {nnunet_vol_name}")
             
-            # Rename label file
-            new_label_name = f"{item['new_base']}{item['old_label'].suffix}"
-            new_label_path = item['old_label'].parent / new_label_name
-            item['old_label'].rename(new_label_path)
+            # Process and save cleaned segmentation
+            remove_labels_above_threshold(label_file, out_seg_path, threshold=threshold)
             
-            success_count += 1
+            processed_count += 1
+            print()
             
-            if success_count % 10 == 0:
-                print(f"  Renamed {success_count}/{len(rename_map)} pairs...")
-                
         except Exception as e:
-            error_count += 1
-            print(f"  ERROR renaming {item['old_base']}: {e}")
+            print(f"  ✗ ERROR processing pair: {e}")
+            skipped_count += 1
+            print()
     
-    print(f"\n{'='*80}")
-    print(f"COMPLETE: {success_count} pairs renamed successfully")
-    if error_count > 0:
-        print(f"ERRORS: {error_count} pairs failed")
-    print(f"{'='*80}")
-
-
-def main():
-    # ==================== CONFIGURATION ====================
-    base_dir = Path(r"C:\\Users\\anoma\\Downloads\\surgipath-datasets\\v2\\cleaned-backup")
-    images_dir = base_dir / "imagesTr"
-    labels_dir = base_dir / "labelsTr"
-    
-    # Set to False to actually perform the rename
-    DRY_RUN = False
-    
-    # ==================== VALIDATION ====================
-    if not base_dir.exists():
-        print(f"ERROR: Base directory not found: {base_dir}")
-        return
-    
-    if not images_dir.exists():
-        print(f"ERROR: imagesTr directory not found: {images_dir}")
-        return
-    
-    if not labels_dir.exists():
-        print(f"ERROR: labelsTr directory not found: {labels_dir}")
-        return
-    
-    # ==================== PROCESSING ====================
-    print(f"{'='*80}")
-    print("STANDARDIZING FILENAMES TO CVPP_XXX FORMAT")
-    print(f"{'='*80}\n")
-    print(f"Base directory: {base_dir}")
-    print(f"Images: {images_dir}")
-    print(f"Labels: {labels_dir}\n")
-    
-    # Step 1: Find all matching pairs
-    print("Step 1: Finding image-label pairs...")
-    pairs = get_file_pairs(images_dir, labels_dir)
-    
-    if not pairs:
-        print("\nERROR: No matching image-label pairs found!")
-        return
-    
-    print(f"  Found {len(pairs)} matching pairs\n")
-    
-    # Step 2: Generate new names
-    print("Step 2: Generating CVPP_XXX names...")
-    rename_map = generate_new_names(pairs)
-    print(f"  Generated {len(rename_map)} new names\n")
-    
-    # Step 3: Preview
-    preview_renames(rename_map)
-    
-    # Step 4: Rename (or dry run)
-    rename_files(rename_map, dry_run=DRY_RUN)
-    
-    if DRY_RUN:
-        print("\n" + "="*80)
-        print("DRY RUN MODE - No files were actually renamed")
-        print("Set DRY_RUN = False in the code to perform actual renaming")
-        print("="*80)
+    # Summary
+    print("=" * 60)
+    print("PROCESSING COMPLETE")
+    print("=" * 60)
+    print(f"Successfully processed: {processed_count} pairs")
+    print(f"Skipped: {skipped_count} pairs")
+    print()
+    print(f"Output locations:")
+    print(f"  Volumes:       {renamed_vol_path.absolute()}")
+    print(f"  Segmentations: {cervical_labels_path.absolute()}")
 
 
 if __name__ == "__main__":
-    main()
+    # Set your base path here
+    base_path = r"C:\\Users\\anoma\\Downloads\\spine-segmentation-data-cleaning\\RSNA_clean_v3"
+    
+    # Process dataset (keeping labels 1-7 for cervical vertebrae)
+    process_rsna_dataset(base_path, threshold=7)
