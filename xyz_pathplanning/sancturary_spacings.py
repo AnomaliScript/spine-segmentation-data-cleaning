@@ -121,12 +121,8 @@ def selective_resample(img_data, zoom_factors, order=3):
     
     return resampled_data
 
-
+# Preserves orientation but updates voxel dimensions.
 def create_new_affine(original_affine, original_spacing, target_spacing):
-    """
-    Create new affine matrix with updated spacing.
-    Preserves orientation but updates voxel dimensions.
-    """
     new_affine = original_affine.copy()
     
     # Scale rotation matrix columns by new spacing
@@ -214,13 +210,10 @@ def process_file_to_sanctuary(input_path, output_path, threshold=1.0,
 # ============================================================================
 
 def create_sanctuary_for_dataset(dataset_config, dry_run=True):
-    """
-    Create /pthpl sanctuary folder for a single dataset.
-    
-    Args:
-        dataset_config: Dictionary with dataset paths
-        dry_run: If True, analyze without creating files
-    """
+    # Create /pthpl sanctuary folder for a single dataset.
+    # dataset_config: Dictionary with dataset paths
+    # dry_run: If True, analyze without creating files
+
     name = dataset_config['name']
     base_path = dataset_config['base_path']
     volumes_dir = base_path / dataset_config['volumes_dir']
